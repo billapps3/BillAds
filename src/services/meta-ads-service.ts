@@ -164,6 +164,7 @@ export class MetaAdsService {
         'id',
         'name',
         'status',
+        'updated_time',
         'destination_type',
         'optimization_goal',
         'billing_event',

@@ -202,6 +202,7 @@ export default function Insights() {
             daily_budget: campaign.daily_budget,
             total_ads: metadata.total_ads,
             last_synced_at: campaign.synced_at,
+            active_ad_sets_count: metadata.active_ad_sets_count,
           },
         })
 

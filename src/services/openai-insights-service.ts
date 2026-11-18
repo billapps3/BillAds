@@ -24,6 +24,7 @@ interface CampaignContext {
   daily_budget?: number;
   total_ads?: number;
   last_synced_at?: string;
+  active_ad_sets_count?: number;
 }
 
 interface OpenAIInsightRequest {
@@ -242,13 +243,16 @@ Segmentação/criativo coletados do Meta em: ${ctx.last_synced_at ? new Date(ctx
 
     if (ctx.targeting_summary) {
       const t = ctx.targeting_summary;
+      const multipleAdSetsNote = (ctx.active_ad_sets_count ?? 1) > 1
+        ? `\nATENÇÃO: esta campanha tem ${ctx.active_ad_sets_count} conjuntos de anúncios ATIVOS simultaneamente - a segmentação abaixo é só do conjunto editado mais recentemente, outros conjuntos ativos podem ter públicos diferentes. Não generalize essa segmentação como "a campanha inteira".`
+        : '';
       prompt += `
 
-=== SEGMENTAÇÃO (público-alvo configurado) ===
+=== SEGMENTAÇÃO (público-alvo configurado) ===${multipleAdSetsNote}
 Idade: ${t.age_min ?? '?'} a ${t.age_max ?? '?'} anos
 Gêneros: ${t.genders && t.genders.length ? t.genders.map(g => g === 1 ? 'Homens' : g === 2 ? 'Mulheres' : 'Outro').join(', ') : 'Todos'}
 Localização: ${t.geo_locations && t.geo_locations.length ? t.geo_locations.join(', ') : 'não informado'}
-Interesses segmentados: ${t.interests && t.interests.length ? t.interests.join(', ') : 'sem segmentação por interesse (público amplo)'}
+Interesses segmentados: ${t.interests && t.interests.length ? t.interests.join(', ') : 'sem segmentação por interesse (público amplo, ou "Advantage+ Audience" com expansão automática ativada)'}
 Públicos customizados: ${t.custom_audiences && t.custom_audiences.length ? t.custom_audiences.join(', ') : 'nenhum'}`;
     }
 

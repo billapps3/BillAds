@@ -86,12 +86,20 @@ export class SyncService {
             ]);
 
             if (adSetsResult.success && adSetsResult.data && adSetsResult.data.length > 0) {
-              const adSet = adSetsResult.data[0];
+              // A API da Meta não garante ordem por relevância - sem isso, um conjunto de
+              // anúncios antigo/pausado podia "vencer" o conjunto ativo que o usuário acabou
+              // de editar, fazendo a IA analisar uma segmentação desatualizada.
+              const activeAdSets = adSetsResult.data.filter((a: any) => a.status === 'ACTIVE');
+              const candidates = activeAdSets.length > 0 ? activeAdSets : adSetsResult.data;
+              const adSet = [...candidates].sort(
+                (a: any, b: any) => new Date(b.updated_time || 0).getTime() - new Date(a.updated_time || 0).getTime()
+              )[0];
               const targeting = adSet.targeting || {};
               metadata.destination_type = adSet.destination_type;
               metadata.optimization_goal = adSet.optimization_goal;
               metadata.billing_event = adSet.billing_event;
               metadata.bid_strategy = adSet.bid_strategy;
+              metadata.active_ad_sets_count = activeAdSets.length;
               metadata.targeting_summary = {
                 age_min: targeting.age_min,
                 age_max: targeting.age_max,
