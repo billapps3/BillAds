@@ -1,10 +1,39 @@
 import { DailyMetrics, CampaignInsight } from '@/types/ads';
 
+interface CampaignContext {
+  objective?: string;
+  destination_type?: string;
+  optimization_goal?: string;
+  billing_event?: string;
+  bid_strategy?: string;
+  targeting_summary?: {
+    age_min?: number;
+    age_max?: number;
+    genders?: number[];
+    geo_locations?: string[];
+    interests?: string[];
+    custom_audiences?: string[];
+  };
+  creative_summary?: {
+    title?: string;
+    body?: string;
+    call_to_action?: string;
+    format?: string;
+    destination_url?: string;
+  };
+  daily_budget?: number;
+  total_ads?: number;
+  last_synced_at?: string;
+}
+
 interface OpenAIInsightRequest {
   campaign_name: string;
   platform: string;
   metrics: DailyMetrics[];
   previous_period_metrics?: DailyMetrics[];
+  period_label?: string;
+  previous_period_label?: string;
+  context?: CampaignContext;
 }
 
 interface MetricsSummary {
@@ -12,11 +41,25 @@ interface MetricsSummary {
   totalImpressions: number;
   totalClicks: number;
   totalConversions: number;
+  totalReach: number;
   avgCTR: number;
   avgCPC: number;
-  avgROAS?: number;
+  avgCPA?: number;
+  avgFrequency: number;
   daysActive: number;
+  actionsBreakdown: Record<string, number>;
 }
+
+// Mapeia destination_type/objective do Meta para uma descrição humana do que "conversão" significa ali
+const DESTINATION_LABELS: Record<string, string> = {
+  WHATSAPP: 'WhatsApp (iniciar conversa)',
+  MESSENGER: 'Messenger (iniciar conversa)',
+  INSTAGRAM_DIRECT: 'Instagram Direct (iniciar conversa)',
+  WEBSITE: 'Site/Landing page externa',
+  APP: 'Abertura de aplicativo',
+  ON_AD: 'Formulário instantâneo (lead ad)',
+  PHONE_CALL: 'Ligação telefônica',
+};
 
 export class OpenAIInsightsService {
   private apiKey: string;
@@ -64,8 +107,8 @@ export class OpenAIInsightsService {
               content: prompt,
             },
           ],
-          temperature: 0.7,
-          max_tokens: 1500,
+          temperature: 0.6,
+          max_tokens: 2000,
         }),
       });
 
@@ -92,27 +135,33 @@ export class OpenAIInsightsService {
    * System prompt - define o comportamento e especialidade da IA
    */
   private getSystemPrompt(): string {
-    return `Você é um especialista em análise de campanhas de publicidade digital com 10+ anos de experiência em Meta Ads e Google Ads.
+    return `Você é um media buyer sênior, especialista em tráfego pago com 15+ anos de experiência prática gerenciando orçamentos de Meta Ads (Facebook/Instagram) e Google Ads para negócios locais, e-commerce, geração de leads e campanhas de conversa (WhatsApp/Messenger).
 
-Sua missão é analisar campanhas publicitárias e gerar insights acionáveis que ajudem a melhorar o ROI, otimizar custos e aumentar conversões.
+Você NÃO é um analista genérico de métricas - você é um especialista que entende que cada combinação de objetivo + destino do anúncio tem benchmarks e lógica de otimização DIFERENTES:
+
+- Campanhas para WHATSAPP/MESSENGER: o que importa é custo por conversa iniciada (não CPA de compra), qualidade da conversa, se o copy do anúncio já filtra quem não tem intenção real, e se a resposta no WhatsApp é rápida (isso afeta o algoritmo). CTR baixo aqui pode ser normal se a oferta for muito específica.
+- Campanhas para SITE/LANDING PAGE (tráfego ou conversão): CTR, qualidade da página de destino, velocidade de carregamento, e se o pixel está disparando corretamente importam muito.
+- Campanhas de LEAD AD (formulário instantâneo): a fricção é baixíssima, então CTR/custo por lead tende a ser melhor, mas a QUALIDADE do lead costuma ser pior - avalie se o volume de leads faz sentido vs o copy ser vago demais.
+- Campanhas de ENGAJAMENTO: curtidas/comentários não pagam contas - questione se o objetivo da campanha faz sentido para o negócio.
+
+Sua análise SEMPRE considera, em conjunto:
+1. Os números (CTR, CPC, CPA, frequência, alcance, conversões) comparados ao benchmark CORRETO para aquele destino/objetivo específico - nunca aplique benchmark de e-commerce para uma campanha de WhatsApp.
+2. O criativo (texto do anúncio, CTA, formato) - se o copy bate com o público e a oferta.
+3. A segmentação (idade, localização, interesses) - se faz sentido para o que está sendo vendido.
+4. Frequência alta (>3-4) com CTR caindo = fadiga de criativo, precisa trocar o anúncio.
+5. Orçamento vs volume de dados - campanha com pouco gasto/poucos cliques não tem dados suficientes para decisões definitivas, isso deve ser dito claramente.
 
 Sua análise deve ser:
-- Específica: Use números reais dos dados fornecidos
-- Acionável: Cada recomendação deve ser implementável
-- Priorizada: Comece pelos problemas mais críticos
-- Baseada em dados: Sempre justifique com métricas
-- Em Português: Respostas sempre em português brasileiro
-
-Focos principais de análise:
-1. Performance (CTR, CPC, ROAS)
-2. Eficiência de custo
-3. Oportunidades de otimização
-4. Problemas críticos
-5. Comparação com períodos anteriores (se disponível)`;
+- Específica: use os números reais fornecidos, nunca genérico
+- Contextualizada ao destino do anúncio: nunca dê a mesma recomendação para WhatsApp e para e-commerce
+- Acionável: cada recomendação deve ser um passo concreto que o gestor de tráfego pode executar hoje
+- Priorizada: comece pelo problema de maior impacto no resultado do negócio, não só no CTR
+- Honesta sobre incerteza: se os dados são poucos, diga isso em vez de forçar uma conclusão
+- Em português brasileiro, direto, sem enrolação de "consultor"`;
   }
 
   /**
-   * Calcula estatísticas agregadas dos métricas
+   * Calcula estatísticas agregadas dos métricas, incluindo breakdown de actions (ex: mensagens iniciadas no WhatsApp)
    */
   private calculateMetricsSummary(metrics: DailyMetrics[]): MetricsSummary {
     const total = metrics.reduce(
@@ -121,23 +170,38 @@ Focos principais de análise:
         impressions: acc.impressions + (m.impressions || 0),
         clicks: acc.clicks + (m.clicks || 0),
         conversions: acc.conversions + (m.conversions || 0),
+        reach: Math.max(acc.reach, m.reach || 0),
+        frequencySum: acc.frequencySum + (m.frequency || 0),
       }),
-      { spend: 0, impressions: 0, clicks: 0, conversions: 0 }
+      { spend: 0, impressions: 0, clicks: 0, conversions: 0, reach: 0, frequencySum: 0 }
     );
+
+    const actionsBreakdown: Record<string, number> = {};
+    for (const m of metrics) {
+      const breakdown = (m.custom_metrics as any)?.actionsBreakdown as Array<{ type: string; value: number }> | undefined;
+      if (breakdown) {
+        for (const a of breakdown) {
+          actionsBreakdown[a.type] = (actionsBreakdown[a.type] || 0) + a.value;
+        }
+      }
+    }
 
     const avgCTR = total.impressions > 0 ? (total.clicks / total.impressions) * 100 : 0;
     const avgCPC = total.clicks > 0 ? total.spend / total.clicks : 0;
-    const avgROAS = total.spend > 0 ? (total.conversions * 50) / total.spend : 0; // Assumindo $50 por conversão
+    const avgCPA = total.conversions > 0 ? total.spend / total.conversions : undefined;
 
     return {
       totalSpend: total.spend,
       totalImpressions: total.impressions,
       totalClicks: total.clicks,
       totalConversions: total.conversions,
+      totalReach: total.reach,
       avgCTR: parseFloat(avgCTR.toFixed(2)),
       avgCPC: parseFloat(avgCPC.toFixed(2)),
-      avgROAS: parseFloat(avgROAS.toFixed(2)),
+      avgCPA: avgCPA ? parseFloat(avgCPA.toFixed(2)) : undefined,
+      avgFrequency: parseFloat((total.frequencySum / Math.max(1, metrics.length)).toFixed(2)),
       daysActive: metrics.length,
+      actionsBreakdown,
     };
   }
 
@@ -150,68 +214,126 @@ Focos principais de análise:
   }
 
   /**
-   * Build análise prompt avançada
+   * Build análise prompt avançada, incluindo contexto de destino/segmentação/criativo
    */
   private buildAdvancedPrompt(
     request: OpenAIInsightRequest,
     currentSummary: MetricsSummary,
     previousSummary: MetricsSummary | null
   ): string {
+    const ctx = request.context || {};
+    const destinationLabel = ctx.destination_type
+      ? DESTINATION_LABELS[ctx.destination_type] || ctx.destination_type
+      : 'Não informado (sincronize a campanha para capturar isso)';
+
     let prompt = `
 CAMPANHA: ${request.campaign_name}
 PLATAFORMA: ${request.platform.toUpperCase()}
-PERÍODO: Últimos ${currentSummary.daysActive} dias
+PERÍODO ANALISADO: ${request.period_label || `${currentSummary.daysActive} dias com dados`} (${currentSummary.daysActive} dia(s) com dados registrados nesse intervalo)
+
+=== CONTEXTO DA CAMPANHA (o que ela realmente é) ===
+Objetivo declarado: ${ctx.objective || 'não informado'}
+Destino do anúncio: ${destinationLabel}
+Meta de otimização: ${ctx.optimization_goal || 'não informado'}
+Evento de cobrança: ${ctx.billing_event || 'não informado'}
+Orçamento diário: ${ctx.daily_budget ? `R$ ${(ctx.daily_budget / 100).toFixed(2)}` : 'não informado'}
+Quantidade de anúncios ativos: ${ctx.total_ads ?? 'não informado'}
+Segmentação/criativo coletados do Meta em: ${ctx.last_synced_at ? new Date(ctx.last_synced_at).toLocaleString('pt-BR') : 'não informado'} (se o usuário alterou a campanha no Gerenciador de Anúncios DEPOIS dessa data/hora, essa mudança ainda não está refletida aqui - seria necessário sincronizar de novo)`;
+
+    if (ctx.targeting_summary) {
+      const t = ctx.targeting_summary;
+      prompt += `
+
+=== SEGMENTAÇÃO (público-alvo configurado) ===
+Idade: ${t.age_min ?? '?'} a ${t.age_max ?? '?'} anos
+Gêneros: ${t.genders && t.genders.length ? t.genders.map(g => g === 1 ? 'Homens' : g === 2 ? 'Mulheres' : 'Outro').join(', ') : 'Todos'}
+Localização: ${t.geo_locations && t.geo_locations.length ? t.geo_locations.join(', ') : 'não informado'}
+Interesses segmentados: ${t.interests && t.interests.length ? t.interests.join(', ') : 'sem segmentação por interesse (público amplo)'}
+Públicos customizados: ${t.custom_audiences && t.custom_audiences.length ? t.custom_audiences.join(', ') : 'nenhum'}`;
+    }
+
+    if (ctx.creative_summary && (ctx.creative_summary.body || ctx.creative_summary.title)) {
+      const c = ctx.creative_summary;
+      prompt += `
+
+=== CRIATIVO DO ANÚNCIO ATIVO (o que o usuário vê) ===
+Título: ${c.title || '(sem título)'}
+Texto do anúncio: ${c.body || '(sem corpo de texto capturado)'}
+Call-to-action: ${c.call_to_action || 'não informado'}
+Formato: ${c.format || 'não informado'}
+Destino do clique: ${c.destination_url || destinationLabel}`;
+    }
+
+    prompt += `
 
 === MÉTRICAS ATUAIS ===
 Gasto Total: R$ ${currentSummary.totalSpend.toFixed(2)}
 Impressões: ${currentSummary.totalImpressions.toLocaleString()}
+Alcance: ${currentSummary.totalReach.toLocaleString()}
+Frequência média: ${currentSummary.avgFrequency}x (quantas vezes a mesma pessoa viu o anúncio)
 Cliques: ${currentSummary.totalClicks.toLocaleString()}
 CTR (Click-Through Rate): ${currentSummary.avgCTR.toFixed(2)}%
 CPC (Custo por Clique): R$ ${currentSummary.avgCPC.toFixed(2)}
-Conversões: ${currentSummary.totalConversions}
-ROAS Estimado: ${currentSummary.avgROAS.toFixed(2)}x`;
+Conversões (${destinationLabel}): ${currentSummary.totalConversions}
+${currentSummary.avgCPA ? `Custo por conversão: R$ ${currentSummary.avgCPA.toFixed(2)}` : 'Custo por conversão: não calculável (zero conversões no período)'}`;
+
+    const actionEntries = Object.entries(currentSummary.actionsBreakdown).filter(([type]) => type !== 'link_click');
+    if (actionEntries.length > 0) {
+      prompt += `
+
+=== DETALHAMENTO DE AÇÕES CAPTURADAS PELO META (use para confirmar o que está realmente convertendo) ===
+${actionEntries.map(([type, value]) => `- ${type}: ${value}`).join('\n')}`;
+    }
 
     if (previousSummary) {
       const spendVar = this.calculateVariation(currentSummary.totalSpend, previousSummary.totalSpend);
       const ctrVar = this.calculateVariation(currentSummary.avgCTR, previousSummary.avgCTR);
       const convVar = this.calculateVariation(currentSummary.totalConversions, previousSummary.totalConversions);
+      const cpaVar = currentSummary.avgCPA && previousSummary.avgCPA
+        ? this.calculateVariation(currentSummary.avgCPA, previousSummary.avgCPA)
+        : null;
 
       prompt += `
 
-=== COMPARAÇÃO COM PERÍODO ANTERIOR ===
+=== COMPARAÇÃO COM PERÍODO ANTERIOR (${request.previous_period_label || 'período imediatamente anterior, mesma duração'}) ===
 Gasto: ${spendVar > 0 ? '+' : ''}${spendVar}%
 CTR: ${ctrVar > 0 ? '+' : ''}${ctrVar}%
-Conversões: ${convVar > 0 ? '+' : ''}${convVar}%`;
+Conversões: ${convVar > 0 ? '+' : ''}${convVar}%
+${cpaVar !== null ? `Custo por conversão: ${cpaVar > 0 ? '+' : ''}${cpaVar}%` : ''}
+Use essa comparação para dizer se a campanha está melhorando, piorando ou estável - e se alguma mudança recente de segmentação/criativo/orçamento já aparenta ter efeito.`;
+    } else {
+      prompt += `
+
+=== COMPARAÇÃO COM PERÍODO ANTERIOR ===
+Não disponível (sem dados suficientes no período anterior para comparar). Avise que a avaliação de tendência fica limitada sem esse comparativo.`;
     }
 
     prompt += `
 
 === TAREFA ===
-Analise esta campanha e gere de 3 a 5 insights estruturados. Para cada insight, forneça:
+Analise esta campanha como um media buyer especialista analisaria, levando em conta TODO o contexto acima (destino do anúncio, segmentação, criativo) - não apenas os números isolados. Gere de 3 a 5 insights estruturados e priorizados pelo impacto no resultado do negócio. Para cada insight, forneça:
 1. Um título claro e direto
-2. Uma descrição detalhada do problema/oportunidade
-3. Uma ação recomendada específica e implementável
-4. Um score de confiança (0-100) baseado nos dados
+2. Uma descrição que conecta o número ao contexto (ex: "para uma campanha de WhatsApp, CTR de X% é/não é um problema porque...")
+3. Uma ação recomendada específica, prática e implementável hoje
+4. Um score de confiança (0-100) baseado na quantidade e qualidade dos dados disponíveis
 
-IMPORTANTE: Forneça APENAS um objeto JSON válido, sem texto adicional.
+IMPORTANTE: Forneça APENAS um objeto JSON válido, sem texto adicional, sem markdown.
 
-Exemplo de formato esperado:
+Formato esperado:
 {
   "insights": [
     {
-      "title": "CTR Abaixo da Média",
-      "description": "O CTR de 2.1% está abaixo da média do mercado (3-5% para ${request.platform}). Isso indica que o anúncio não está atraindo suficientemente o público-alvo.",
-      "recommended_action": "1. Teste novo copy focado em pain points do público. 2. Experimente diferentes variações de imagem/vídeo. 3. Refine o targeting para melhorar relevância.",
+      "title": "título curto e direto",
+      "description": "análise contextualizada com os números reais",
+      "recommended_action": "passos concretos e específicos",
       "confidence": 85
     }
   ]
 }
 
-Considere ao analisar:
-- Benchmarks de mercado (CTR típico: 1-3%, CPC varia por setor)
-- Padrões de performance ao longo do período
-- Oportunidades de otimização específicas para ${request.platform}
-- Problemas que estão impactando o ROI negativamente`;
+Lembre-se: se o destino é WhatsApp/Messenger, NÃO compare CTR ou CPA com benchmarks de e-commerce. Se a segmentação é muito ampla ou muito restrita para o objetivo, aponte isso. Se o criativo (texto) não foi capturado, diga que a análise de copy ficou limitada.
+
+ATENÇÃO AO PERÍODO: o Meta Ads leva de 24 a 72h para sair da fase de aprendizagem e estabilizar a entrega depois de uma mudança de segmentação, orçamento ou criativo. Se o período analisado tiver poucos dias (menos de 3-4 dias com dados) desde a data de sincronização informada acima, deixe claro que ainda é cedo para avaliar o efeito de qualquer mudança recente, em vez de dar um veredito definitivo.`;
 
     return prompt;
   }
@@ -277,13 +399,16 @@ Considere ao analisar:
     if (titleLower.includes('cpc') || titleLower.includes('custo') || titleLower.includes('orçamento')) {
       return 'cost_efficiency';
     }
-    if (titleLower.includes('conversão') || titleLower.includes('roi') || titleLower.includes('roas')) {
+    if (titleLower.includes('conversão') || titleLower.includes('roi') || titleLower.includes('roas') || titleLower.includes('conversa')) {
       return 'conversion';
     }
     if (titleLower.includes('público') || titleLower.includes('segmentação') || titleLower.includes('targeting')) {
       return 'audience';
     }
-    if (titleLower.includes('trend') || titleLower.includes('padrão') || titleLower.includes('comportamento')) {
+    if (titleLower.includes('criativo') || titleLower.includes('copy') || titleLower.includes('anúncio')) {
+      return 'creative';
+    }
+    if (titleLower.includes('trend') || titleLower.includes('padrão') || titleLower.includes('comportamento') || titleLower.includes('frequência')) {
       return 'trend';
     }
     return 'performance';

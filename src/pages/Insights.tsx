@@ -1,9 +1,43 @@
 import { useState, useEffect } from 'react'
 import { useCampaigns } from '@/hooks/useCampaignData'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { AlertCircle, Loader2, Zap, TrendingUp, TrendingDown, Target, CheckCircle2 } from 'lucide-react'
+import { AlertCircle, Loader2, Zap, TrendingUp, TrendingDown, Target, CheckCircle2, RefreshCw } from 'lucide-react'
 import { OpenAIInsightsService } from '@/services/openai-insights-service'
 import { SupabaseService } from '@/services/supabase-service'
+import { SyncService } from '@/services/sync-service'
+
+const ANALYSIS_WINDOW_DAYS = 7
+
+function toISODate(d: Date) {
+  return d.toISOString().split('T')[0]
+}
+
+function formatDateBR(iso: string) {
+  const [y, m, d] = iso.split('-')
+  return `${d}/${m}/${y}`
+}
+
+// Janela "atual" = últimos N dias; janela "anterior" = N dias imediatamente antes dela.
+// Evita que a análise dilua mudanças recentes (segmentação, criativo) com meses de histórico acumulado.
+function getAnalysisWindows() {
+  const today = new Date()
+  const currentEnd = toISODate(today)
+  const currentStart = toISODate(new Date(today.getTime() - (ANALYSIS_WINDOW_DAYS - 1) * 24 * 60 * 60 * 1000))
+
+  const prevEndDate = new Date(today.getTime() - ANALYSIS_WINDOW_DAYS * 24 * 60 * 60 * 1000)
+  const prevStartDate = new Date(prevEndDate.getTime() - (ANALYSIS_WINDOW_DAYS - 1) * 24 * 60 * 60 * 1000)
+  const previousEnd = toISODate(prevEndDate)
+  const previousStart = toISODate(prevStartDate)
+
+  return {
+    currentStart,
+    currentEnd,
+    previousStart,
+    previousEnd,
+    currentLabel: `últimos ${ANALYSIS_WINDOW_DAYS} dias (${formatDateBR(currentStart)} a ${formatDateBR(currentEnd)})`,
+    previousLabel: `${ANALYSIS_WINDOW_DAYS} dias anteriores (${formatDateBR(previousStart)} a ${formatDateBR(previousEnd)})`,
+  }
+}
 
 interface CampaignWithAccount {
   campaign: any
@@ -22,11 +56,16 @@ interface CampaignAnalysis {
 }
 
 export default function Insights() {
-  const { data: campaigns, isLoading } = useCampaigns()
+  const { data: allCampaigns, isLoading, refetch: refetchCampaigns } = useCampaigns()
   const [integrations, setIntegrations] = useState<any[]>([])
   const [analyses, setAnalyses] = useState<CampaignAnalysis[]>([])
   const [analyzing, setAnalyzing] = useState(false)
+  const [analysisStep, setAnalysisStep] = useState('')
   const [selectedCampaigns, setSelectedCampaigns] = useState<Set<string>>(new Set())
+  const [lastAnalysisWindow, setLastAnalysisWindow] = useState<{ currentLabel: string; previousLabel: string } | null>(null)
+
+  // Foca só em campanhas ativas - análise de histórico pausado é um recurso separado
+  const campaigns = (allCampaigns || []).filter(c => c.status === 'active' || (c.status as string) === 'ACTIVE')
 
   // Carregar integrações para saber nomes das contas
   useEffect(() => {
@@ -76,8 +115,23 @@ export default function Insights() {
 
     setAnalyzing(true)
     const openaiService = new OpenAIInsightsService()
+    const selectedIds = new Set(selectedCampaigns)
 
-    const campaignsToAnalyze = campaigns.filter(c => selectedCampaigns.has(c.id))
+    // Sincroniza antes de analisar: sem isso, a segmentação/criativo e as métricas usadas na análise
+    // podem estar com dias (ou semanas) de defasagem em relação ao que o usuário mudou no Meta.
+    setAnalysisStep('Sincronizando dados mais recentes do Meta Ads...')
+    try {
+      await SyncService.syncAllCampaigns()
+    } catch (error) {
+      console.error('Falha ao sincronizar antes da análise:', error)
+    }
+    const { data: freshCampaigns } = await refetchCampaigns()
+    const freshActiveCampaigns = (freshCampaigns || []).filter(
+      c => c.status === 'active' || (c.status as string) === 'ACTIVE'
+    )
+    setAnalysisStep('')
+
+    const campaignsToAnalyze = freshActiveCampaigns.filter(c => selectedIds.has(c.id))
     const newAnalyses: CampaignAnalysis[] = campaignsToAnalyze.map(campaign => ({
       campaignId: campaign.id,
       campaignName: campaign.campaign_name,
@@ -90,35 +144,65 @@ export default function Insights() {
 
     setAnalyses(newAnalyses)
 
+    const windows = getAnalysisWindows()
+    setLastAnalysisWindow({ currentLabel: windows.currentLabel, previousLabel: windows.previousLabel })
+
     // Analisar cada campanha selecionada
     for (let i = 0; i < campaignsToAnalyze.length; i++) {
       const campaign = campaignsToAnalyze[i]
       const analysisIndex = newAnalyses.findIndex(a => a.campaignId === campaign.id)
 
       try {
-        // Buscar métricas da campanha
-        const metrics = await SupabaseService.getCampaignMetrics(campaign.id)
+        // Janela recente (últimos N dias) é o que importa de verdade para decisões no presente -
+        // olhar todo o histórico acumulado dilui mudanças recentes de segmentação/criativo/orçamento.
+        const metrics = await SupabaseService.getCampaignMetrics(campaign.id, windows.currentStart, windows.currentEnd)
+        const previousMetrics = await SupabaseService.getCampaignMetrics(campaign.id, windows.previousStart, windows.previousEnd)
 
         if (metrics.length === 0) {
+          // Pode ser campanha muito nova ou sync ainda não trouxe dados do período - confere se existe ALGUM dado histórico
+          const anyMetrics = await SupabaseService.getCampaignMetrics(campaign.id)
           newAnalyses[analysisIndex].status = 'completed'
           newAnalyses[analysisIndex].insights = [
-            {
-              title: 'Sem dados ainda',
-              description: 'Esta campanha ainda não possui métricas registradas.',
-              recommended_action: 'Aguarde a sincronização de dados',
-              confidence: 0,
-            },
+            anyMetrics.length === 0
+              ? {
+                  title: 'Sem dados ainda',
+                  description: 'Esta campanha ainda não possui métricas registradas.',
+                  recommended_action: 'Aguarde a sincronização de dados',
+                  confidence: 0,
+                }
+              : {
+                  title: `Sem dados nos ${windows.currentLabel}`,
+                  description: `Existem métricas antigas para esta campanha, mas nenhuma dentro do período analisado (${windows.currentLabel}). Isso pode indicar que a campanha ficou sem veiculação recente ou que a sincronização ainda não trouxe os dias mais novos.`,
+                  recommended_action: 'Sincronize novamente em alguns minutos e verifique se a campanha está mesmo ativa e com orçamento disponível no Meta Ads Manager.',
+                  confidence: 0,
+                },
           ]
           newAnalyses[analysisIndex].score = 50
           setAnalyses([...newAnalyses])
           continue
         }
 
-        // Analisar com OpenAI
+        // Analisar com OpenAI, incluindo contexto de destino/segmentação/criativo capturado na sincronização
+        const metadata = (campaign as any).metadata || {}
         const insights = await openaiService.analyzePerformance({
           campaign_name: campaign.campaign_name,
           platform: campaign.platform,
-          metrics: metrics,
+          metrics,
+          previous_period_metrics: previousMetrics.length > 0 ? previousMetrics : undefined,
+          period_label: windows.currentLabel,
+          previous_period_label: windows.previousLabel,
+          context: {
+            objective: campaign.objective,
+            destination_type: metadata.destination_type,
+            optimization_goal: metadata.optimization_goal,
+            billing_event: metadata.billing_event,
+            bid_strategy: metadata.bid_strategy,
+            targeting_summary: metadata.targeting_summary,
+            creative_summary: metadata.creative_summary,
+            daily_budget: campaign.daily_budget,
+            total_ads: metadata.total_ads,
+            last_synced_at: campaign.synced_at,
+          },
         })
 
         // Salvar insights no banco
@@ -159,8 +243,19 @@ export default function Insights() {
       {/* Header */}
       <div>
         <h1 className="text-3xl font-bold">Insights & Análises</h1>
-        <p className="text-muted-foreground mt-1">IA analisando performance de suas campanhas</p>
+        <p className="text-muted-foreground mt-1">IA especialista em tráfego pago analisando suas campanhas ativas</p>
       </div>
+
+      {!isLoading && campaigns.length === 0 && (
+        <Card>
+          <CardContent className="pt-6">
+            <p className="text-sm text-muted-foreground text-center">
+              Nenhuma campanha ativa no momento. A análise de IA foca em campanhas ativas, onde as recomendações têm impacto imediato.
+              Sincronize suas integrações em Configurações se você ativou uma campanha recentemente.
+            </p>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Seleção de Campanhas */}
       {!analyzing && campaigns && campaigns.length > 0 && (
@@ -180,7 +275,7 @@ export default function Insights() {
                 className="w-4 h-4 cursor-pointer"
               />
               <label htmlFor="select-all" className="flex-1 cursor-pointer font-medium">
-                Selecionar Todas as Campanhas ({campaigns.length})
+                Selecionar Todas as Campanhas Ativas ({campaigns.length})
               </label>
               <span className="text-sm text-muted-foreground">
                 {selectedCampaigns.size} selecionadas
@@ -239,10 +334,19 @@ export default function Insights() {
       {analyzing && (
         <Card className="border-blue-200 bg-blue-50">
           <CardContent className="pt-6 flex items-center gap-3">
-            <Loader2 className="w-5 h-5 animate-spin text-blue-600" />
-            <p className="text-sm text-blue-700 font-medium">Analisando {selectedCampaigns.size} campanha(s) com IA...</p>
+            {analysisStep ? <RefreshCw className="w-5 h-5 animate-spin text-blue-600" /> : <Loader2 className="w-5 h-5 animate-spin text-blue-600" />}
+            <p className="text-sm text-blue-700 font-medium">
+              {analysisStep || `Analisando ${selectedCampaigns.size} campanha(s) com IA...`}
+            </p>
           </CardContent>
         </Card>
+      )}
+
+      {/* Período usado na análise */}
+      {lastAnalysisWindow && !analyzing && analyses.length > 0 && (
+        <p className="text-xs text-muted-foreground">
+          Período analisado: {lastAnalysisWindow.currentLabel} • comparado com {lastAnalysisWindow.previousLabel}
+        </p>
       )}
 
       {/* Resumo geral */}

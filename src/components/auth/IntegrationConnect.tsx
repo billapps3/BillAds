@@ -4,11 +4,12 @@ import { MetaAdsService } from '@/services/meta-ads-service'
 import { GoogleAdsService } from '@/services/google-ads-service'
 import { SyncService } from '@/services/sync-service'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { AlertCircle, Loader2, CheckCircle2, Trash2, RefreshCw } from 'lucide-react'
+import { AlertCircle, Loader2, CheckCircle2, Trash2, RefreshCw, KeyRound } from 'lucide-react'
 
 interface Integration {
   id: string
   platform: 'meta' | 'google'
+  platform_account_id: string
   platform_account_name: string
   status: string
   last_sync: string | null
@@ -32,6 +33,9 @@ export default function IntegrationConnect({ onConnected }: IntegrationConnectPr
   const [metaAccounts, setMetaAccounts] = useState<any[]>([])
   const [selectedMetaAccount, setSelectedMetaAccount] = useState('')
   const [loadingAccounts, setLoadingAccounts] = useState(false)
+  const [updatingTokenId, setUpdatingTokenId] = useState<string | null>(null)
+  const [newTokenValue, setNewTokenValue] = useState('')
+  const [savingToken, setSavingToken] = useState(false)
 
   const loadIntegrations = async () => {
     try {
@@ -77,6 +81,46 @@ export default function IntegrationConnect({ onConnected }: IntegrationConnectPr
       await loadIntegrations()
     } catch (err) {
       setError('Erro ao desconectar: ' + String(err))
+    }
+  }
+
+  const handleUpdateToken = async (integrationId: string) => {
+    if (!newTokenValue.trim()) {
+      setSyncMessage('Erro: Cole um token válido')
+      return
+    }
+
+    setSavingToken(true)
+    setSyncMessage('')
+
+    try {
+      // Valida o token antes de salvar
+      const metaService = new MetaAdsService(newTokenValue)
+      const validation = await metaService.validateToken()
+
+      if (!validation.success) {
+        setSyncMessage('Erro: Token inválido - ' + validation.error)
+        return
+      }
+
+      const { error: updateError } = await supabase
+        .from('integrations')
+        .update({ access_token: newTokenValue, status: 'active' })
+        .eq('id', integrationId)
+
+      if (updateError) {
+        setSyncMessage('Erro ao salvar token: ' + updateError.message)
+        return
+      }
+
+      setSyncMessage('Token atualizado com sucesso! Clique em Sincronizar.')
+      setUpdatingTokenId(null)
+      setNewTokenValue('')
+      await loadIntegrations()
+    } catch (err) {
+      setSyncMessage('Erro: ' + String(err))
+    } finally {
+      setSavingToken(false)
     }
   }
 
@@ -140,7 +184,7 @@ export default function IntegrationConnect({ onConnected }: IntegrationConnectPr
         return
       }
 
-      await supabase.from('integrations').insert({
+      const { error: upsertError } = await supabase.from('integrations').upsert({
         user_id: user.id,
         platform: 'meta',
         platform_account_id: account.id,
@@ -148,7 +192,14 @@ export default function IntegrationConnect({ onConnected }: IntegrationConnectPr
         access_token: metaToken,
         status: 'active',
         last_sync: new Date().toISOString(),
+      }, {
+        onConflict: 'user_id,platform,platform_account_id'
       })
+
+      if (upsertError) {
+        setError('Erro ao salvar integração: ' + upsertError.message)
+        return
+      }
 
       setMetaToken('')
       setShowMetaForm(false)
@@ -262,6 +313,18 @@ export default function IntegrationConnect({ onConnected }: IntegrationConnectPr
                           </>
                         )}
                       </button>
+                      {integration.platform === 'meta' && (
+                        <button
+                          onClick={() => {
+                            setUpdatingTokenId(updatingTokenId === integration.id ? null : integration.id)
+                            setNewTokenValue('')
+                          }}
+                          className="flex items-center gap-1 px-3 py-1 bg-amber-500 text-white text-sm rounded hover:bg-amber-600 transition-colors"
+                        >
+                          <KeyRound className="w-3 h-3" />
+                          Atualizar Token
+                        </button>
+                      )}
                       <button
                         onClick={() => handleDisconnect(integration.id)}
                         className="flex items-center gap-1 px-3 py-1 bg-red-600 text-white text-sm rounded hover:bg-red-700 transition-colors"
@@ -271,6 +334,41 @@ export default function IntegrationConnect({ onConnected }: IntegrationConnectPr
                       </button>
                     </div>
                   </div>
+
+                  {updatingTokenId === integration.id && (
+                    <div className="mt-3 pt-3 border-t border-green-200 space-y-2">
+                      <label className="block text-sm font-medium">Novo Token de Acesso Meta</label>
+                      <input
+                        type="password"
+                        value={newTokenValue}
+                        onChange={(e) => setNewTokenValue(e.target.value)}
+                        placeholder="Cole o token novo e válido aqui"
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                      />
+                      <p className="text-xs text-gray-500">
+                        Use um token fresco (sem ter feito logout do Facebook depois de gerá-lo)
+                      </p>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => handleUpdateToken(integration.id)}
+                          disabled={savingToken || !newTokenValue}
+                          className="flex-1 flex items-center justify-center gap-2 px-3 py-1.5 bg-blue-600 text-white text-sm rounded hover:bg-blue-700 transition-colors disabled:opacity-50"
+                        >
+                          {savingToken && <Loader2 className="w-3 h-3 animate-spin" />}
+                          Salvar Token
+                        </button>
+                        <button
+                          onClick={() => {
+                            setUpdatingTokenId(null)
+                            setNewTokenValue('')
+                          }}
+                          className="flex-1 px-3 py-1.5 bg-gray-300 text-gray-700 text-sm rounded hover:bg-gray-400 transition-colors"
+                        >
+                          Cancelar
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -343,19 +441,39 @@ export default function IntegrationConnect({ onConnected }: IntegrationConnectPr
               {metaAccounts.length > 0 && (
                 <div>
                   <label className="block text-sm font-medium mb-2">Selecione a Conta Meta</label>
-                  <select
-                    value={selectedMetaAccount}
-                    onChange={(e) => setSelectedMetaAccount(e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                  >
-                    <option value="">-- Escolha uma conta --</option>
+                  <div className="space-y-2">
                     {metaAccounts.map((account: any) => (
-                      <option key={account.id} value={account.id}>
-                        {account.name} (ID: {account.id})
-                      </option>
+                      <label key={account.id} className="flex items-start gap-3 p-3 border border-gray-300 rounded-lg cursor-pointer hover:bg-gray-100 transition-colors">
+                        <input
+                          type="radio"
+                          name="metaAccount"
+                          value={account.id}
+                          checked={selectedMetaAccount === account.id}
+                          onChange={(e) => setSelectedMetaAccount(e.target.value)}
+                          className="mt-1"
+                        />
+                        <div className="flex-1">
+                          <p className="font-medium text-gray-900">
+                            {account.name || account.business_name || 'Conta Meta'}
+                          </p>
+                          <p className="text-xs text-gray-600 mt-0.5">
+                            ID: <span className="font-mono">{account.id}</span>
+                          </p>
+                          {account.currency && (
+                            <p className="text-xs text-gray-500 mt-1">
+                              💱 Moeda: {account.currency}
+                            </p>
+                          )}
+                          {account.timezone_name && (
+                            <p className="text-xs text-gray-500">
+                              🕐 Fuso: {account.timezone_name}
+                            </p>
+                          )}
+                        </div>
+                      </label>
                     ))}
-                  </select>
-                  <p className="text-xs text-gray-500 mt-1">
+                  </div>
+                  <p className="text-xs text-gray-500 mt-2">
                     Escolha qual conta Meta você deseja sincronizar
                   </p>
                 </div>

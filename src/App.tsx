@@ -7,6 +7,8 @@ import Campaigns from './pages/Campaigns'
 import Insights from './pages/Insights'
 import Settings from './pages/Settings'
 import LoginForm from './components/auth/LoginForm'
+import AuthCallback from './pages/AuthCallback'
+import ResetPassword from './pages/ResetPassword'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -35,24 +37,28 @@ function AppContent() {
   }
 
   return (
-    <Router>
-      <Layout>
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/campaigns" element={<Campaigns />} />
-          <Route path="/insights" element={<Insights />} />
-          <Route path="/settings" element={<Settings />} />
-          <Route path="*" element={<Navigate to="/" />} />
-        </Routes>
-      </Layout>
-    </Router>
+    <Layout>
+      <Routes>
+        <Route path="/" element={<Dashboard />} />
+        <Route path="/campaigns" element={<Campaigns />} />
+        <Route path="/insights" element={<Insights />} />
+        <Route path="/settings" element={<Settings />} />
+        <Route path="*" element={<Navigate to="/" />} />
+      </Routes>
+    </Layout>
   )
 }
 
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <AppContent />
+      <Router>
+        <Routes>
+          <Route path="/auth/callback" element={<AuthCallback />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
+          <Route path="*" element={<AppContent />} />
+        </Routes>
+      </Router>
     </QueryClientProvider>
   )
 }

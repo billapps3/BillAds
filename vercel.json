@@ -8,5 +8,11 @@
       "source": "/:path*",
       "destination": "/"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/healthcheck",
+      "schedule": "0 9 * * *"
+    }
   ]
 }
